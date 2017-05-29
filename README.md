@@ -16,7 +16,9 @@ Run it.
 Please also have the directories ```/etc/minecraftd```, ```/etc/minecraftd/data``` and user minecraft with uid and gid both 25565 created and ```spigot-1.11.2.jar``` available in ```/etc/minecraftd/data``` before running.
 
 ```minecraftd``` is in its alpha stage so customizations are currently unavailable, new functions will be rolled out soon!
-
+Features:
+- Daemon mode
+- Auto restart (5 seconds apart, max 5 times, ```minecraftd``` will terminate itself after the 5th death of the server)
 Planned features: 
 - Customize memory allocation (Currently hardcoded to 30% ~ 70% of system RAM)
 - jar file path (Currently hardcoded to ```/etc/minecraftd/data/spigot-1.11.2.jar```)
