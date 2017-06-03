@@ -388,7 +388,7 @@ int main(int argc, char** argv){
                 syslog(LOG_NOTICE, "child %d calling execl()", getpid());
                 //int _s=execl("/bin/cat", "cat", (char*) NULL);
                 //server_pid=getpid();
-                int _s=execl("/usr/bin/java", "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-jar", "spigot-1.11.2.jar", (char*) NULL);
+                int _s=execl("/usr/bin/java", "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-Duser.timezone=Asia/Hong_Kong", "-jar", "spigot-1.11.2.jar", (char*) NULL);
                 syslog(LOG_ERR, "child %d back from execl(), status %d, errno %d", getpid(), _s, errno);
                 exit(1);
             }else{
