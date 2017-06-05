@@ -263,22 +263,26 @@ int main(int argc, char** argv) {
                 return EXIT_FAILURE;
             }
             send_cmd(argv[2]);
+            return 0;
             break;
         case '?':
-            if (optopt == 'c')
+            if (optopt == 'e')
                 fprintf(stderr, "Option -%c requires an argument.\n", optopt);
             else if (isprint(optopt))
                 fprintf(stderr, "Unknown option `-%c'.\n", optopt);
             else
                 fprintf(stderr, "Unknown option character `\\x%x'.\n", optopt);
             instructions(argv);
-            return EXIT_FAILURE;
+             return EXIT_FAILURE;
         default:
             instructions(argv);
             return 0;
         }
     }
     // printf ("pflag = %d, dflag = %d, evalue = %s\n", pflag, dflag, cvalue);
+    // no longer able to setgid after setuid. minutes_wasted_here=90;
+    setgid(25565);
+    setuid(25565);
     // parse config file
     FILE* config = fopen("/etc/minecraftd/config.txt", "a+");
     if (config == NULL) {
@@ -286,7 +290,11 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     rewind(config);
-    char configs[4][256]; // java, minheap, maxheap, jarfile
+    char configs[4][257]; // java, minheap, maxheap, jarfile
+    memset(configs[0], 0, 257);
+    memset(configs[1], 0, 257);
+    memset(configs[2], 0, 257);
+    memset(configs[3], 0, 257);
     if (config != NULL) {
         // continue parse
         char* key = NULL;
@@ -297,28 +305,41 @@ int main(int argc, char** argv) {
         do {
             // free
             if (key != NULL) free(key);
-            if (key != NULL) free(key);
+            if (val != NULL) free(val);
             key = NULL;
             val = NULL;
             size_t s1 = 18, s2 = 258, s3 = 1025;
             status = getdelim(&key, &s1, '=', config);
             if (status > 17 || status < 0) {
-                if (errno == 0 && status < 0) break; //end of config file
-                printf("Key %s is too long\n", key);
+                if (status < 0) break; //end of config file
+                printf("Key %s is too long (%d, %d)\n", key, status, errno);
                 getdelim(&val, &s3, '\n', config); //consume the line
                 continue;
             }
-            key[status - 1] = 0;
+            key[status - 1] = 0; //remove `='
             status = getdelim(&val, &s2, '\n', config);
             //val[status - 1] = 0;
             if (status > 257 || status < 0) {
+                if (status < 0) break;
                 printf("Value %s is too long\n", val);
                 continue;
             }
-            val[status - 1] = 0;
+            val[status - 1] = 0; // remove newline
             trim(real_val, 257, val);
             trim(real_key, 17, key);
             printf("Key '%s' has value '%s'\n", real_key, real_val);
+            if (strcmp("java", real_key) == 0) {
+                memcpy(configs[0], real_val, status);
+            }
+            if (strcmp("minheap", real_key) == 0) {
+                memcpy(configs[1], real_val, status);
+            }
+            if (strcmp("maxheap", real_key) == 0) {
+                memcpy(configs[2], real_val, status);
+            }
+            if (strcmp("jarfile", real_key) == 0) {
+                memcpy(configs[3], real_val, status);
+            }
         } while(status != -1);
     } else {
         printf("Unable to open config file\n");
@@ -384,7 +405,8 @@ int main(int argc, char** argv) {
         signal(SIGHUP, reload);
         signal(SIGTERM, term);
         // no longer root
-        setuid(25565);
+        //setuid(25565);
+        //setgid(25565);
         // create a socket at home
         int ipc_fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (ipc_fd < 0) {
@@ -446,6 +468,25 @@ int main(int argc, char** argv) {
                 syslog(LOG_ERR, "Failed to create pipe");
                 exit(1);
             }
+            // process stored configs
+            int minheap_percent = 30;
+            int maxheap_percent = 70;
+            if (configs[0][0] == 0) { //not set
+               // configs[0] = "/usr/bin/java";
+                memcpy(configs[0], (char*) "/usr/bin/java", 14);
+            }
+            if (configs[1][0] != 0) {
+                sscanf(configs[1], "%d", &minheap_percent);
+                minheap = minheap_percent * ram_mb / 100;
+            }
+            if (configs[2][0] != 0) {
+                sscanf(configs[2], "%d", &maxheap_percent);
+                maxheap = maxheap_percent * ram_mb / 100;
+            }
+            if (configs[3][0] == 0) {
+                //configs[3] = "spigot-1.11.2.jar";
+                memcpy(configs[3], (char*) "spigot-1.11.2.jar", 18);
+            }
             char args[3][32];
             sprintf(args[0], "-Xmx%dM", maxheap);
             sprintf(args[1], "-Xms%dM", minheap);
@@ -468,15 +509,11 @@ int main(int argc, char** argv) {
                 close(child_stdin[1]);
                 close(child_stdout[0]);
                 close(child_stdout[1]);
-                syslog(LOG_NOTICE, "child %d calling execl()", getpid());
+                syslog(LOG_NOTICE, "child %d calling execl(), cmd %s %s %s -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalPacing %s -Duser.timezone=Asia/Hong_Kong -jar %s", getpid(), configs[0], args[0], args[1], args[2], configs[3]);
                 // int _s=execl("/bin/cat", "cat", (char*) NULL);
                 // server_pid=getpid();
-                int _s = execl("/usr/bin/java", "java", args[0], args[1],
-                               "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing",
-                               args[2], "-Duser.timezone=Asia/Hong_Kong", "-jar",
-                               "spigot-1.11.2.jar", (char*)NULL);
-                syslog(LOG_ERR, "child %d back from execl(), status %d, errno %d",
-                       getpid(), _s, errno);
+                int _s = execl(configs[0], "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-Duser.timezone=Asia/Hong_Kong", "-jar", configs[3], (char*)NULL);
+                syslog(LOG_ERR, "child %d back from execl(), status %d, errno %d", getpid(), _s, errno);
                 exit(1);
             } else {
                 // parent
