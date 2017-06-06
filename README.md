@@ -1,7 +1,7 @@
 # minecraftd
 The Minecraft daemon wrapper, written in C++
 
-Download it.
+Clone it.
 
 ```git clone https://github.com/lkp111138/minecraftd```
 
@@ -15,7 +15,7 @@ Run it.
 
 Please also have the directories ```/etc/minecraftd```, ```/etc/minecraftd/data``` and user minecraft with uid and gid both 25565 created and ```spigot-1.11.2.jar``` available in ```/etc/minecraftd/data``` before running.
 
-```minecraftd``` is in its alpha stage so customizations are currently unavailable, new functions will be rolled out soon!
+```minecraftd``` is in beta so bugs may exist, and certain features are unavailable, new functions will be rolled out soon!
 Features:
 - Daemon mode
 - Auto restart (5 seconds apart, max 5 times, within 60 secs. ```minecraftd``` will terminate itself after the 5th death of the server within a minute)
@@ -24,5 +24,5 @@ Features:
 
 Planned features: 
 - Data path (Currently hardcoded to ```/etc/minecraftd/data/```)
-- Run as different user and uid/gid
+- Run as different uid/gid
 - ...And more!
