@@ -27,6 +27,7 @@ bool respawn = true;
 int set_nonblocking(int fd);
 size_t trim(char* out, size_t len, const char* str);
 int daemonize(char* name, char* path, char* outfile, char* errfile, char* infile);
+double microtime();
 void reload(int sig);
 void term(int sig);
 void instructions(char** argv);
@@ -123,6 +124,13 @@ int daemonize(char* name, char* path, char* outfile, char* errfile, char* infile
     // open syslog
     openlog(name, LOG_PID, LOG_DAEMON);
     return (0);
+}
+
+double microtime() {
+    double t;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec + tv.tv_usec / 1000000;
 }
 
 void reload(int sig) {
@@ -442,17 +450,36 @@ int main(int argc, char** argv) {
         struct sysinfo si;
         sysinfo(&si);
         long ram_mb = (si.totalram * si.mem_unit) >> 20;
-        // char test[30];
-        // sprintf(test, "ram total %dMB", ram);
         syslog(LOG_NOTICE, "system ram total %ldMB", ram_mb);
         int minheap = 0.3 * ram_mb;
         int maxheap = 0.7 * ram_mb;
-        int restart_count = 1;
+        int restart_count = 0;
         pid_t server_pid;
         int child_stdin[2];
         int child_stdout[2];
+        double restarts[5] = {0};
+        // process stored configs
+        int minheap_percent = 30;
+        int maxheap_percent = 70;
+        if (configs[0][0] == 0) { //not set
+           // configs[0] = "/usr/bin/java";
+            memcpy(configs[0], (char*) "/usr/bin/java", 14);
+        }
+        if (configs[1][0] != 0) {
+            sscanf(configs[1], "%d", &minheap_percent);
+            minheap = minheap_percent * ram_mb / 100;
+        }
+        if (configs[2][0] != 0) {
+            sscanf(configs[2], "%d", &maxheap_percent);
+            maxheap = maxheap_percent * ram_mb / 100;
+        }
+        if (configs[3][0] == 0) {
+            //configs[3] = "spigot-1.11.2.jar";
+            memcpy(configs[3], (char*) "spigot-1.11.2.jar", 18);
+        }
         do {
             syslog(LOG_NOTICE, "Starting server %d...", restart_count);
+            restarts[restart_count] = microtime();
             // cd to data dir
             chdir("/etc/minecraftd/data/");
             // open a pipe
@@ -468,31 +495,12 @@ int main(int argc, char** argv) {
                 syslog(LOG_ERR, "Failed to create pipe");
                 exit(1);
             }
-            // process stored configs
-            int minheap_percent = 30;
-            int maxheap_percent = 70;
-            if (configs[0][0] == 0) { //not set
-               // configs[0] = "/usr/bin/java";
-                memcpy(configs[0], (char*) "/usr/bin/java", 14);
-            }
-            if (configs[1][0] != 0) {
-                sscanf(configs[1], "%d", &minheap_percent);
-                minheap = minheap_percent * ram_mb / 100;
-            }
-            if (configs[2][0] != 0) {
-                sscanf(configs[2], "%d", &maxheap_percent);
-                maxheap = maxheap_percent * ram_mb / 100;
-            }
-            if (configs[3][0] == 0) {
-                //configs[3] = "spigot-1.11.2.jar";
-                memcpy(configs[3], (char*) "spigot-1.11.2.jar", 18);
-            }
+
             char args[3][32];
             sprintf(args[0], "-Xmx%dM", maxheap);
             sprintf(args[1], "-Xms%dM", minheap);
             sprintf(args[2], "-XX:ParallelGCThreads=%d", num_thr);
-            syslog(LOG_NOTICE, "arg0=%s, arg1=%s, arg2=%s", args[0], args[1],
-                   args[2]);
+            syslog(LOG_NOTICE, "arg0=%s, arg1=%s, arg2=%s", args[0], args[1], args[2]);
             // https://stackoverflow.com/a/12839498
             // set_nonblocking(child_stdin[0]);
             // set_nonblocking(child_stdin[1]);
@@ -533,8 +541,7 @@ int main(int argc, char** argv) {
                     server_status = errno;
                     // syslog(LOG_NOTICE, "kill(%d, 0) = %d, errno = %d", server_pid,_k,
                     // errno);
-                    if (_k == -1 && server_status == ESRCH) { // who fucking cares about
-                        // errno when kill() says 0?
+                    if (_k == -1 && server_status == ESRCH) { // who fucking cares about errno when kill() says 0?
                         // minutes_wasted_here=90;
                         // sleep(10);
                         break;
@@ -591,12 +598,13 @@ int main(int argc, char** argv) {
             close(child_stdin[1]);
             close(child_stdout[0]);
 
-            ++restart_count;
-            if (restart_count > 5) {
+            restart_count %= 5;
+            if (restarts[restart_count] - restarts[(restart_count + 1) % 5] < 60) {
                 respawn = false;
-                syslog(LOG_ERR, "Server keeps commiting suicide... Giving up!");
+                syslog(LOG_ERR, "Server keeps commiting suicide (restarted 5 times in %f sec)... Giving up!", restarts[restart_count] - restarts[(restart_count + 1) % 5]);
             }
             if (respawn) {
+                ++restart_count;
                 sleep(5);
             }
         } while (respawn);
