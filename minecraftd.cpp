@@ -39,6 +39,7 @@ int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags);
 }
 
+// https://stackoverflow.com/a/122721/4869560
 size_t trim(char* out, size_t len, const char* str) {
     if (len == 0)
         return 0;
@@ -298,11 +299,12 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     rewind(config);
-    char configs[4][257]; // java, minheap, maxheap, jarfile
+    char configs[5][257]; // java, minheap, maxheap, jarfile, restart_threshold
     memset(configs[0], 0, 257);
     memset(configs[1], 0, 257);
     memset(configs[2], 0, 257);
     memset(configs[3], 0, 257);
+    memset(configs[4], 0, 257);
     if (config != NULL) {
         // continue parse
         char* key = NULL;
@@ -335,7 +337,8 @@ int main(int argc, char** argv) {
             val[status - 1] = 0; // remove newline
             trim(real_val, 257, val);
             trim(real_key, 17, key);
-            printf("Key '%s' has value '%s'\n", real_key, real_val);
+            // printf("Key '%s' has value '%s'\n", real_key, real_val);
+            // define config items here
             if (strcmp("java", real_key) == 0) {
                 memcpy(configs[0], real_val, status);
             }
@@ -348,7 +351,11 @@ int main(int argc, char** argv) {
             if (strcmp("jarfile", real_key) == 0) {
                 memcpy(configs[3], real_val, status);
             }
+            if (strcmp("restart_threshold", real_key) == 0) {
+                memcpy(configs[4], real_val, status);
+            }
         } while(status != -1);
+        fclose(config);
     } else {
         printf("Unable to open config file\n");
         return EXIT_FAILURE;
@@ -397,7 +404,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "Error: daemonize failed\n");
             exit(EXIT_FAILURE);
         }
-        umask(0113);
+        umask(0002);
         daemon_id = getpid();
         // write pid
         pidfile = fopen("/etc/minecraftd/pidfile", "w+");
@@ -461,6 +468,7 @@ int main(int argc, char** argv) {
         // process stored configs
         int minheap_percent = 30;
         int maxheap_percent = 70;
+        int restart_threshold = 60;
         if (configs[0][0] == 0) { //not set
            // configs[0] = "/usr/bin/java";
             memcpy(configs[0], (char*) "/usr/bin/java", 14);
@@ -476,6 +484,9 @@ int main(int argc, char** argv) {
         if (configs[3][0] == 0) {
             //configs[3] = "spigot-1.11.2.jar";
             memcpy(configs[3], (char*) "spigot-1.11.2.jar", 18);
+        }
+        if (configs[4][0] != 0) {
+            sscanf(configs[4], "%d", &restart_threshold);
         }
         do {
             syslog(LOG_NOTICE, "Starting server %d...", restart_count);
@@ -599,7 +610,7 @@ int main(int argc, char** argv) {
             close(child_stdout[0]);
 
             restart_count %= 5;
-            if (restarts[restart_count] - restarts[(restart_count + 1) % 5] < 60) {
+            if (restarts[restart_count] - restarts[(restart_count + 1) % 5] < restart_threshold) {
                 respawn = false;
                 syslog(LOG_ERR, "Server keeps commiting suicide (restarted 5 times in %f sec)... Giving up!", restarts[restart_count] - restarts[(restart_count + 1) % 5]);
             }

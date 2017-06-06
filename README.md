@@ -18,7 +18,7 @@ Please also have the directories ```/etc/minecraftd```, ```/etc/minecraftd/data`
 ```minecraftd``` is in its alpha stage so customizations are currently unavailable, new functions will be rolled out soon!
 Features:
 - Daemon mode
-- Auto restart (5 seconds apart, max 5 times, ```minecraftd``` will terminate itself after the 5th death of the server)
+- Auto restart (5 seconds apart, max 5 times, within 60 secs. ```minecraftd``` will terminate itself after the 5th death of the server within a minute)
 - Custonizable memory allocation (default 30% ~ 70% of total RAM)
 - Customizable jarfile path (default to ```/etc/minecraftd/data/spigot-1.11.2.jar```)
 
