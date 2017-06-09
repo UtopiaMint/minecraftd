@@ -7,9 +7,11 @@ Clone it.
 
 Create necessary user and group and the data directory
 
-```groupadd -g 25565 minecraft
+```bash
+groupadd -g 25565 minecraft
 useradd -u 25565 -g 25565 -d /etc/minecraftd -m -k /dev/null -s /bin/false minecraft
-sudo -u minecraft mkdir -p /etc/minecraftd/data```
+sudo -u minecraft mkdir -p /etc/minecraftd/data
+```
 
 Compile it.
 
