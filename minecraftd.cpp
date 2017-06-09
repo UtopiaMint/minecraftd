@@ -16,6 +16,7 @@
 #include <cstring>
 #include <netdb.h>
 #include <sys/time.h>
+#include <sys/file.h>
 
 #define WAIT_SEC 0
 #define WAIT_USEC 500000
@@ -218,24 +219,31 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     // before start, check process existed
-    FILE* _pidfile = fopen("/etc/minecraftd/pidfile", "r+");
-    pid_t last_pid;
+    int _pidfile = open("/etc/minecraftd/pidfile", O_RDWR);
     bool server_running = false;
-    if (_pidfile == NULL) {
-        switch (errno) {
-        case ENOENT:
-            // no such file
-            break;
-        default:
-            perror("fopen on pidfile");
-            exit(1);
-            break;
-        }
+    int last_pid = 0;
+    if (_pidfile == -1) {
+        perror("Cannot lock pidfile");
+        exit(EXIT_FAILURE);
     } else {
-        fscanf(_pidfile, "%d", &last_pid);
-        kill(last_pid, 0);
-        fclose(_pidfile);
-        server_running = (errno != ESRCH);
+        if (flock(_pidfile, LOCK_EX|LOCK_NB) == -1) {
+            switch (errno) {
+                case EWOULDBLOCK:
+                    // printf("Server already running\n");
+                    // exit(EXIT_FAILURE);
+                    server_running = true;
+                    char pid_str[6];
+                    read(_pidfile, pid_str, 5);
+                    sscanf(pid_str, "%d", &last_pid);
+                    break;
+                default:
+                    perror("flock");
+                    exit(EXIT_FAILURE);
+            }
+        } else {
+            // server not running
+            server_running = false;
+        }
     }
 
     while ((c = getopt(argc, argv, "dks:e:")) != -1) {
@@ -449,6 +457,16 @@ int main(int argc, char** argv) {
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(ipc_fd, &readfds);
+    int _pidfile = open("/etc/minecraftd/pidfile", O_RDWR);
+    if (_pidfile == -1) {
+        syslog(LOG_ERR, "Cannot open pidfile");
+        exit(EXIT_FAILURE);
+    } else {
+        if (flock(_pidfile, LOCK_EX|LOCK_NB) == -1) {
+            syslog(LOG_ERR, "Cannot lock pidfile");
+            exit(EXIT_FAILURE);
+        }
+    }
         syslog(LOG_NOTICE, "Daemon started");
         // start command
         // threads
