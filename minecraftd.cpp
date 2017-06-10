@@ -17,11 +17,11 @@
 #include <netdb.h>
 #include <sys/time.h>
 #include <sys/file.h>
+#include <pwd.h>
+#include <grp.h>
 
 #define WAIT_SEC 0
 #define WAIT_USEC 500000
-
-using namespace std;
 
 bool respawn = true;
 
@@ -245,7 +245,12 @@ int main(int argc, char** argv) {
     while ((c = getopt(argc, argv, "dks:e:")) != -1) {
         switch (c) {
         case 'd':
-            dflag = true;
+            if (server_running == 0) {
+                dflag = true;
+            } else {
+                printf("Server already running\n");
+                exit(EXIT_FAILURE);
+            }
             break;
         case 'k':
             // kill server, send stop
@@ -302,9 +307,6 @@ int main(int argc, char** argv) {
         }
     }
     // printf ("pflag = %d, dflag = %d, evalue = %s\n", pflag, dflag, cvalue);
-    // no longer able to setgid after setuid. minutes_wasted_here=90;
-    setgid(25565);
-    setuid(25565);
     // parse config file
     FILE* config = fopen("/etc/minecraftd/config.txt", "a+");
     if (config == NULL) {
@@ -312,12 +314,14 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     rewind(config);
-    char configs[5][257]; // java, minheap, maxheap, jarfile, restart_threshold
+    char configs[7][257]; // java, minheap, maxheap, jarfile, restart_threshold
     memset(configs[0], 0, 257);
     memset(configs[1], 0, 257);
     memset(configs[2], 0, 257);
     memset(configs[3], 0, 257);
     memset(configs[4], 0, 257);
+    memset(configs[5], 0, 257);
+    memset(configs[6], 0, 257);
     if (config != NULL) {
         // continue parse
         char* key = NULL;
@@ -367,12 +371,21 @@ int main(int argc, char** argv) {
             if (strcmp("restart_threshold", real_key) == 0) {
                 memcpy(configs[4], real_val, status);
             }
+            if (strcmp("user", real_key) == 0) {
+                memcpy(configs[5], real_val, status);
+            }
+            if (strcmp("group", real_key) == 0) {
+                memcpy(configs[6], real_val, status);
+            }
         } while(status != -1);
         fclose(config);
     } else {
         printf("Unable to open config file\n");
         return EXIT_FAILURE;
     }
+    // no longer able to setgid after setuid. minutes_wasted_here=90;
+    // setgid(25565);
+    // setuid(25565);
 
     for (int index = optind; index < argc; index++)
         printf("Non-option argument %s\n", argv[index]);
@@ -385,49 +398,46 @@ int main(int argc, char** argv) {
             }
             printf("'\n");
             return EXIT_FAILURE;
-        }
-
-        // before start, check process existed
-        FILE* pidfile = fopen("/etc/minecraftd/pidfile", "r+");
-        pid_t daemon_id;
-        if (pidfile == NULL) {
-            switch (errno) {
-            case ENOENT:
-                // no such file
-                break;
-            default:
-                perror("fopen on pidfile");
-                exit(1);
-                break;
+        } 
+        
+        // drop priviledges
+        if (configs[6][0] != 0) {
+            errno = 0;
+            struct group* grp = getgrnam(configs[6]);
+            if (grp != NULL) {
+                setgid(grp->gr_gid);
+            } else {
+                printf("An error occured\n");
+                exit(EXIT_FAILURE);
             }
         } else {
-            pid_t daemon_id;
-            fscanf(pidfile, "%d", &daemon_id);
-            kill(daemon_id, 0);
-            fclose(pidfile);
-            if (errno == ESRCH) {
-                // ok process doesnt exist
-                printf("Starting daemon\n");
-            } else {
-                // running, exit
-                printf("Daemon already running, exiting\n");
-                exit(1);
-            }
+            setgid(25565);
         }
-        pidfile = fopen("/etc/minecraftd/pidfile", "w+");
+        if (configs[5][0] != 0) { 
+            struct passwd* user = getpwnam(configs[5]);
+            if (user != NULL) {
+                setuid(user->pw_uid);
+            } else {
+                printf("An error occured\n");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            setuid(25565);
+        }
+
+        FILE* pidfile = fopen("/etc/minecraftd/pidfile", "w+");
         if (pidfile == NULL) {
             printf("Cannot open pidfile for writing, aborting\n");
             exit(1);
         }
         // start daemon
         int res;
-        if ((res = daemonize((char*)"minecraftd", (char*)"/etc/minecraftd/", NULL,
-                             NULL, NULL)) != 0) {
+        if ((res = daemonize((char*)"minecraftd", (char*)"/etc/minecraftd/", NULL, NULL, NULL)) != 0) {
             fprintf(stderr, "Error: daemonize failed\n");
             exit(EXIT_FAILURE);
         }
         umask(0002);
-        daemon_id = getpid();
+        pid_t daemon_id = getpid();
         // write pid
         pidfile = fopen("/etc/minecraftd/pidfile", "w+");
         if (pidfile == NULL) {
@@ -484,7 +494,7 @@ int main(int argc, char** argv) {
         syslog(LOG_NOTICE, "Daemon started");
         // start command
         // threads
-        int num_thr = thread::hardware_concurrency();
+        int num_thr = std::thread::hardware_concurrency();
         // ram
         struct sysinfo si;
         sysinfo(&si);
