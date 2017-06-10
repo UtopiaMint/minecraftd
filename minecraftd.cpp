@@ -153,12 +153,12 @@ void term(int sig) {
 
 void instructions(char** argv) {
     printf("minecraftd v0.1 by lkp111138\n\
-            Usage: %s -d|-k|-s|-e [argument]\n\
-            -d          : Start minecraftd in daemon mode\n\
-            -k          : Stop server\n\
-            -s something: Say something as [Server]\n\
-            -e command  : Execute command in the console\n\
-            Precedence of flags are same as above\n",
+Usage: %s -d|-k|-s|-e [argument]\n\
+        -d          : Start minecraftd in daemon mode\n\
+        -k          : Stop server\n\
+        -s something: Say something as [Server]\n\
+        -e command  : Execute command in the console\n\
+Precedence of flags are same as above\n",
            argv[0]);
 }
 
@@ -208,37 +208,29 @@ void send_cmd(char* cmd) {
 
 int main(int argc, char** argv) {
     char* cvalue = NULL;
-    char c;
+    char c = 0;
     int pflag = 0, dflag = 0;
-    if (geteuid()) {
-        printf("Try `sudo");
-        for (int i = 0; i < argc; ++i) {
-            printf(" %s", argv[i]);
-        }
-        printf("'\n");
-        return EXIT_FAILURE;
-    }
+
     // before start, check process existed
-    int _pidfile = open("/etc/minecraftd/pidfile", O_RDWR);
-    bool server_running = false;
+    int _pidfile = open("/etc/minecraftd/pidfile", O_RDONLY);
+    int server_running = 0; // 0: not runnng, 1: running, -ve: error
     int last_pid = 0;
     if (_pidfile == -1) {
-        perror("Cannot lock pidfile");
-        exit(EXIT_FAILURE);
+        server_running = -errno;
     } else {
         if (flock(_pidfile, LOCK_EX|LOCK_NB) == -1) {
             switch (errno) {
                 case EWOULDBLOCK:
                     // printf("Server already running\n");
                     // exit(EXIT_FAILURE);
-                    server_running = true;
+                    server_running = 1;
                     char pid_str[6];
                     read(_pidfile, pid_str, 5);
                     sscanf(pid_str, "%d", &last_pid);
                     break;
                 default:
-                    perror("flock");
-                    exit(EXIT_FAILURE);
+                    server_running = -errno;
+                   //  exit(EXIT_FAILURE);
             }
         } else {
             // server not running
@@ -246,6 +238,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (argc < 2) {
+        instructions(argv);
+        exit(EXIT_SUCCESS);
+    }
     while ((c = getopt(argc, argv, "dks:e:")) != -1) {
         switch (c) {
         case 'd':
@@ -253,9 +249,12 @@ int main(int argc, char** argv) {
             break;
         case 'k':
             // kill server, send stop
-            if (!server_running) {
+            if (server_running == 0) {
                 printf("Server isn't running\n");
                 return EXIT_FAILURE;
+            }
+            if (server_running < 0) {
+                printf("Error locking pidfile: %s", strerror(-server_running));
             }
             send_cmd((char*)"stop");
             // dont respawn!
@@ -264,10 +263,13 @@ int main(int argc, char** argv) {
             break;
         case 's':
             // say something, send "say argument"
-            if (!server_running) {
+            if (server_running == 0) {
                 printf("Server isn't running\n");
                 return EXIT_FAILURE;
             }
+            if (server_running < 0) {
+                printf("Error locking pidfile: %s", strerror(-server_running));
+            }            
             char buf[1025];
             snprintf(buf, 1024, "say %s", argv[2]);
             send_cmd(buf);
@@ -275,10 +277,13 @@ int main(int argc, char** argv) {
             break;
         case 'e':
             // send command, send argument
-            if (!server_running) {
+            if (server_running == 0) {
                 printf("Server isn't running\n");
                 return EXIT_FAILURE;
             }
+            if (server_running < 0) {
+                printf("Error locking pidfile: %s", strerror(-server_running));
+            }            
             send_cmd(argv[2]);
             return 0;
             break;
@@ -317,7 +322,7 @@ int main(int argc, char** argv) {
         // continue parse
         char* key = NULL;
         char* val = NULL;
-        char real_key[17];
+        char real_key[33];
         char real_val[257];
         int status = 0;
         do {
@@ -326,9 +331,9 @@ int main(int argc, char** argv) {
             if (val != NULL) free(val);
             key = NULL;
             val = NULL;
-            size_t s1 = 18, s2 = 258, s3 = 1025;
+            size_t s1 = 34, s2 = 258, s3 = 1025;
             status = getdelim(&key, &s1, '=', config);
-            if (status > 17 || status < 0) {
+            if (status > 33 || status < 0) {
                 if (status < 0) break; //end of config file
                 printf("Key %s is too long (%d, %d)\n", key, status, errno);
                 getdelim(&val, &s3, '\n', config); //consume the line
@@ -373,6 +378,15 @@ int main(int argc, char** argv) {
         printf("Non-option argument %s\n", argv[index]);
     // return 0;
     if (dflag) {
+        if (geteuid()) {
+            printf("Try `sudo");
+            for (int i = 0; i < argc; ++i) {
+                printf(" %s", argv[i]);
+            }
+            printf("'\n");
+            return EXIT_FAILURE;
+        }
+
         // before start, check process existed
         FILE* pidfile = fopen("/etc/minecraftd/pidfile", "r+");
         pid_t daemon_id;
