@@ -212,11 +212,11 @@ int main(int argc, char** argv) {
     int pflag = 0, dflag = 0;
 
     // before start, check process existed
-    int _pidfile = open("/etc/minecraftd/pidfile", O_RDONLY|O_CREAT);
+    int _pidfile = open("/etc/minecraftd/pidfile", O_RDONLY, 0644);
     int server_running = 0; // 0: not runnng, 1: running, -ve: error
     int last_pid = 0;
     if (_pidfile == -1) {
-        server_running = -errno;
+        server_running = errno != ENOENT ? -errno : 0;
     } else {
         if (flock(_pidfile, LOCK_EX|LOCK_NB) == -1) {
             switch (errno) {
@@ -431,7 +431,7 @@ int main(int argc, char** argv) {
 
         FILE* pidfile = fopen("/etc/minecraftd/pidfile", "w+");
         if (pidfile == NULL) {
-            printf("Cannot open pidfile for writing, aborting\n");
+            printf("Cannot open pidfile for writing, aborting (%s)\n", strerror(errno));
             exit(1);
         }
         // start daemon
