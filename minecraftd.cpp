@@ -212,7 +212,7 @@ int main(int argc, char** argv) {
     int pflag = 0, dflag = 0;
 
     // before start, check process existed
-    int _pidfile = open("/etc/minecraftd/pidfile", O_RDONLY);
+    int _pidfile = open("/etc/minecraftd/pidfile", O_RDONLY|O_CREAT);
     int server_running = 0; // 0: not runnng, 1: running, -ve: error
     int last_pid = 0;
     if (_pidfile == -1) {
@@ -248,7 +248,11 @@ int main(int argc, char** argv) {
             if (server_running == 0) {
                 dflag = true;
             } else {
-                printf("Server already running\n");
+		if (server_running == 1) {
+                    printf("Server already running\n");
+		} else {
+		    printf("Error: %s\n", strerror(-server_running));
+		}
                 exit(EXIT_FAILURE);
             }
             break;
