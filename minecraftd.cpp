@@ -172,7 +172,7 @@ void send_cmd(char* cmd) {
     }
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/tmp/minecraftdipc", sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, "\0minecraftdipc", sizeof(addr.sun_path) - 1);
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         perror("connect");
         exit(1);
@@ -467,9 +467,9 @@ int main(int argc, char** argv) {
         struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, "/tmp/minecraftdipc", sizeof(addr.sun_path) - 1);
+        strncpy(addr.sun_path, "\0minecraftdipc", sizeof(addr.sun_path) - 1);
         // unlink before binding
-        unlink("/tmp/minecraftdipc");
+        // unlink("/tmp/minecraftdipc");
         if (-1 == bind(ipc_fd, (struct sockaddr*)&addr, sizeof(addr))) {
             syslog(LOG_ERR, "bind errno=%d", errno);
             exit(1);
