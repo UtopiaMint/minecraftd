@@ -114,7 +114,7 @@ int daemonize(char* name, char* path, char* outfile, char* errfile, char* infile
     chdir(path);
     // Close all open file descriptors
     int fd;
-    for (fd = sysconf(_SC_OPEN_MAX); fd > 0; --fd) {
+    for (fd = sysconf(_SC_OPEN_MAX); fd >= 0; --fd) {
         close(fd);
     }
 
@@ -411,7 +411,7 @@ int main(int argc, char** argv) {
             if (grp != NULL) {
                 setgid(grp->gr_gid);
             } else {
-                printf("An error occured\n");
+                printf("An error occured while mapping group\n");
                 exit(EXIT_FAILURE);
             }
         } else {
@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
             if (user != NULL) {
                 setuid(user->pw_uid);
             } else {
-                printf("An error occured\n");
+                printf("An error occured while mapping user\n");
                 exit(EXIT_FAILURE);
             }
         } else {
@@ -459,9 +459,9 @@ int main(int argc, char** argv) {
         //setuid(25565);
         //setgid(25565);
         // create a socket at home
-        int ipc_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        int ipc_fd = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
         if (ipc_fd < 0) {
-            syslog(LOG_ERR, "Failed to create IPC socket");
+            syslog(LOG_ERR, "Failed to create IPC socket, %s", strerror(errno));
             exit(1);
         }
         struct sockaddr_un addr;
@@ -485,16 +485,16 @@ int main(int argc, char** argv) {
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(ipc_fd, &readfds);
-    int _pidfile = open("/etc/minecraftd/pidfile", O_RDWR);
-    if (_pidfile == -1) {
-        syslog(LOG_ERR, "Cannot open pidfile");
-        exit(EXIT_FAILURE);
-    } else {
-        if (flock(_pidfile, LOCK_EX|LOCK_NB) == -1) {
-            syslog(LOG_ERR, "Cannot lock pidfile");
+        int _pidfile = open("/etc/minecraftd/pidfile", O_RDWR|O_CLOEXEC);
+        if (_pidfile == -1) {
+            syslog(LOG_ERR, "Cannot open pidfile");
             exit(EXIT_FAILURE);
+        } else {
+            if (flock(_pidfile, LOCK_EX|LOCK_NB) == -1) {
+                syslog(LOG_ERR, "Cannot lock pidfile");
+                exit(EXIT_FAILURE);
+            }
         }
-    }
         syslog(LOG_NOTICE, "Daemon started");
         // start command
         // threads
@@ -539,20 +539,22 @@ int main(int argc, char** argv) {
             restarts[restart_count] = microtime();
             // cd to data dir
             chdir("/etc/minecraftd/data/");
-            // open a pipe
-            if (pipe(child_stdin) < 0) {
-                // error
-                syslog(LOG_ERR, "Failed to create pipe");
-                exit(1);
+            // why dont just allocate a pty?
+            int master_pty_fd = getpt();
+            if (master_pty_fd < 0) {
+                syslog(LOG_ERR, "Unable to allocate pty, error %s", strerror(errno));
+                exit(EXIT_FAILURE);
             }
-            if (pipe(child_stdout) < 0) {
-                // error
-                close(child_stdin[0]);
-                close(child_stdin[0]);
-                syslog(LOG_ERR, "Failed to create pipe");
-                exit(1);
+            if (grantpt(master_pty_fd) != 0) {
+                syslog(LOG_ERR, "grantpt: %s", strerror(errno));
+                exit(EXIT_FAILURE);
             }
-
+            if (unlockpt(master_pty_fd) != 0) {
+                syslog(LOG_ERR, "unlockpt: %s", strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+            // allocated, open slave side
+            int slave_pty_fd = open(ptsname(master_pty_fd), O_RDWR);
             char args[3][32];
             sprintf(args[0], "-Xmx%dM", maxheap);
             sprintf(args[1], "-Xms%dM", minheap);
@@ -561,19 +563,15 @@ int main(int argc, char** argv) {
             // https://stackoverflow.com/a/12839498
             // set_nonblocking(child_stdin[0]);
             // set_nonblocking(child_stdin[1]);
-            set_nonblocking(child_stdout[0]);
-            set_nonblocking(child_stdout[1]);
+            set_nonblocking(master_pty_fd);
             server_pid = fork();
-            // syslog(LOG_NOTICE, "fork called at 266");
             if (server_pid == 0) {
                 // child
-                dup2(child_stdin[0], STDIN_FILENO);   // stdin
-                dup2(child_stdout[1], STDOUT_FILENO); // stdout
-                dup2(child_stdout[1], STDERR_FILENO); // stderr
-                close(child_stdin[0]);
-                close(child_stdin[1]);
-                close(child_stdout[0]);
-                close(child_stdout[1]);
+                dup2(slave_pty_fd, STDIN_FILENO);   // stdin
+                dup2(slave_pty_fd, STDOUT_FILENO); // stdout
+                dup2(slave_pty_fd, STDERR_FILENO); // stderr
+                close(master_pty_fd);
+                close(slave_pty_fd);
                 syslog(LOG_NOTICE, "child %d calling execl(), cmd %s %s %s -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalPacing %s -Duser.timezone=Asia/Hong_Kong -jar %s", getpid(), configs[0], args[0], args[1], args[2], configs[3]);
                 // int _s=execl("/bin/cat", "cat", (char*) NULL);
                 // server_pid=getpid();
@@ -582,15 +580,14 @@ int main(int argc, char** argv) {
                 exit(1);
             } else {
                 // parent
-                close(child_stdin[0]);
-                close(child_stdout[1]);
                 // wait on socket instead
-                // select with timeval=1s
+                // select with timeval=.5s
                 char buf[1025];
                 int server_status = 0;
                 sleep(1); // wait for process spawn
                 int _k = 0;
                 int client = -1;
+                close(slave_pty_fd);
                 while (_k != -1 || server_status != ESRCH) {
                     // try kill server_pid with signal 0.
                     // and send command
@@ -612,8 +609,8 @@ int main(int argc, char** argv) {
                         FD_SET(client, &readfds);
                     int maxfd = ipc_fd > client ? ipc_fd : client;
                     // bool more_stdout=false;
-                    maxfd = maxfd > child_stdout[0] ? maxfd : child_stdout[0];
-                    FD_SET(child_stdout[0], &readfds);
+                    maxfd = maxfd > master_pty_fd ? maxfd : master_pty_fd;
+                    FD_SET(master_pty_fd, &readfds);
                     if (select(maxfd + 1, &readfds, NULL, NULL, &tv) >
                             0) { // maxfd+1. minutes_wasted_here=60;
                         if (FD_ISSET(ipc_fd, &readfds)) { // info from server
@@ -625,16 +622,16 @@ int main(int argc, char** argv) {
                         if (client > 0 && FD_ISSET(client, &readfds)) { // info from client
                             memset(buf, 0, 1025);
                             if (read(client, buf, 1024)) { // not eof
-                                write(child_stdin[1], buf, strlen(buf));
-                                write(child_stdin[1], "\n", 1);
+                                write(master_pty_fd, buf, strlen(buf));
+                                write(master_pty_fd, "\n", 1);
                             } else {
                                 close(client);
                                 client = -1;
                             }
                         }
-                        if (FD_ISSET(child_stdout[0], &readfds)) {
+                        if (FD_ISSET(master_pty_fd, &readfds)) {
                             // send to client if exist
-                            while (read(child_stdout[0], buf, 1024) > 0) {
+                            while (read(master_pty_fd, buf, 1024) > 0) {
                                 if (client > 0)
                                     write(client, buf, strlen(buf));
                                 memset(buf, 0, 1025);
@@ -652,8 +649,8 @@ int main(int argc, char** argv) {
                 // waitpid(server_pid, NULL, 0);
                 syslog(LOG_NOTICE, "Server pid %d exited", server_pid);
             }
-            close(child_stdin[1]);
-            close(child_stdout[0]);
+            // close(child_stdin[1]);
+            // close(child_stdout[0]);
 
             restart_count %= 5;
             if (restarts[restart_count] - restarts[(restart_count + 1) % 5] < restart_threshold) {
