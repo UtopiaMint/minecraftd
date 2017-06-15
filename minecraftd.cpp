@@ -158,6 +158,7 @@ Usage: %s -d|-k|-s|-e [argument]\n\
         -k          : Stop server\n\
         -s something: Say something as [Server]\n\
         -e command  : Execute command in the console\n\
+        -f file     : Use this config file\n\
 Precedence of flags are same as above\n",
            argv[0]);
 }
@@ -242,7 +243,8 @@ int main(int argc, char** argv) {
         instructions(argv);
         exit(EXIT_SUCCESS);
     }
-    while ((c = getopt(argc, argv, "dks:e:")) != -1) {
+    char* config_file_path = (char*) "/etc/minecraftd/config.txt";
+    while ((c = getopt(argc, argv, "dks:e:f:")) != -1) {
         switch (c) {
         case 'd':
             if (server_running == 0) {
@@ -280,7 +282,7 @@ int main(int argc, char** argv) {
                 printf("Error locking pidfile: %s", strerror(-server_running));
             }            
             char buf[1025];
-            snprintf(buf, 1024, "say %s", argv[2]);
+            snprintf(buf, 1024, "say %s", optarg);
             send_cmd(buf);
             return 0;
             break;
@@ -293,8 +295,11 @@ int main(int argc, char** argv) {
             if (server_running < 0) {
                 printf("Error locking pidfile: %s", strerror(-server_running));
             }            
-            send_cmd(argv[2]);
+            send_cmd(optarg);
             return 0;
+            break;
+        case 'f':
+            config_file_path = optarg;
             break;
         case '?':
             if (optopt == 'e')
@@ -312,20 +317,16 @@ int main(int argc, char** argv) {
     }
     // printf ("pflag = %d, dflag = %d, evalue = %s\n", pflag, dflag, cvalue);
     // parse config file
-    FILE* config = fopen("/etc/minecraftd/config.txt", "a+");
+    FILE* config = fopen(config_file_path, "a+");
     if (config == NULL) {
-        printf("Cannot open config file.\n");
+        printf("Cannot open config file %s: %s\n", config_file_path, strerror(errno));
         return EXIT_FAILURE;
     }
     rewind(config);
-    char configs[7][257]; // java, minheap, maxheap, jarfile, restart_threshold
-    memset(configs[0], 0, 257);
-    memset(configs[1], 0, 257);
-    memset(configs[2], 0, 257);
-    memset(configs[3], 0, 257);
-    memset(configs[4], 0, 257);
-    memset(configs[5], 0, 257);
-    memset(configs[6], 0, 257);
+    char configs[8][257]; // java, minheap, maxheap, jarfile, restart_threshold, user, group, datadir
+    for (int i = 0; i < 8; ++i) {
+        memset(configs[i], 0, 257);
+    }
     if (config != NULL) {
         // continue parse
         char* key = NULL;
@@ -362,15 +363,19 @@ int main(int argc, char** argv) {
             // define config items here
             if (strcmp("java", real_key) == 0) {
                 memcpy(configs[0], real_val, status);
+                printf("Using Java `%s'\n", real_val);
             }
             if (strcmp("minheap", real_key) == 0) {
                 memcpy(configs[1], real_val, status);
+                printf("Initial heap will be %s%% of system RAM\n", real_val);
             }
             if (strcmp("maxheap", real_key) == 0) {
                 memcpy(configs[2], real_val, status);
+                printf("Maximum heap will be %s%% of system RAM\n", real_val);
             }
             if (strcmp("jarfile", real_key) == 0) {
                 memcpy(configs[3], real_val, status);
+                printf("Using server jar file `%s' within data directory\n", real_val);
             }
             if (strcmp("restart_threshold", real_key) == 0) {
                 memcpy(configs[4], real_val, status);
@@ -381,10 +386,14 @@ int main(int argc, char** argv) {
             if (strcmp("group", real_key) == 0) {
                 memcpy(configs[6], real_val, status);
             }
+            if (strcmp("datadir", real_key) == 0) {
+                memcpy(configs[7], real_val, status);
+                printf("Using server data from `%s'\n", real_val);
+            }
         } while(status != -1);
         fclose(config);
     } else {
-        printf("Unable to open config file\n");
+        perror("Unable to open config file");
         return EXIT_FAILURE;
     }
     // no longer able to setgid after setuid. minutes_wasted_here=90;
@@ -431,11 +440,12 @@ int main(int argc, char** argv) {
 
         FILE* pidfile = fopen("/etc/minecraftd/pidfile", "w+");
         if (pidfile == NULL) {
-            printf("Cannot open pidfile for writing, aborting (%s)\n", strerror(errno));
+            printf("Cannot open pidfile for writing, aborting (%m)\n");
             exit(1);
         }
         // start daemon
         int res;
+        printf("minecraftd starting\n");
         if ((res = daemonize((char*)"minecraftd", (char*)"/etc/minecraftd/", NULL, NULL, NULL)) != 0) {
             fprintf(stderr, "Error: daemonize failed\n");
             exit(EXIT_FAILURE);
@@ -461,7 +471,7 @@ int main(int argc, char** argv) {
         // create a socket at home
         int ipc_fd = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
         if (ipc_fd < 0) {
-            syslog(LOG_ERR, "Failed to create IPC socket, %s", strerror(errno));
+            syslog(LOG_ERR, "Failed to create IPC socket, %m");
             exit(1);
         }
         struct sockaddr_un addr;
@@ -538,19 +548,23 @@ int main(int argc, char** argv) {
             syslog(LOG_NOTICE, "Starting server %d...", restart_count);
             restarts[restart_count] = microtime();
             // cd to data dir
-            chdir("/etc/minecraftd/data/");
+            if (configs[7][0] != 0) {
+                chdir(configs[7]);
+            } else {
+                chdir("/etc/minecraftd/data/");
+            }
             // why dont just allocate a pty?
             int master_pty_fd = getpt();
             if (master_pty_fd < 0) {
-                syslog(LOG_ERR, "Unable to allocate pty, error %s", strerror(errno));
+                syslog(LOG_ERR, "Unable to allocate pty, error %m");
                 exit(EXIT_FAILURE);
             }
             if (grantpt(master_pty_fd) != 0) {
-                syslog(LOG_ERR, "grantpt: %s", strerror(errno));
+                syslog(LOG_ERR, "grantpt: %m");
                 exit(EXIT_FAILURE);
             }
             if (unlockpt(master_pty_fd) != 0) {
-                syslog(LOG_ERR, "unlockpt: %s", strerror(errno));
+                syslog(LOG_ERR, "unlockpt: %m");
                 exit(EXIT_FAILURE);
             }
             // allocated, open slave side
