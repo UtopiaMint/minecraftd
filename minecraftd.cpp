@@ -582,6 +582,9 @@ int main(int argc, char** argv) {
             } else {
                 chdir("/etc/minecraftd/data/");
             }
+            if (configs[8][0] == 0) {
+                memcpy(configs[8], (char*) "25565", 6);
+            }
             // why dont just allocate a pty?
             int master_pty_fd = getpt();
             if (master_pty_fd < 0) {
