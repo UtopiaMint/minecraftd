@@ -1,3 +1,18 @@
+/* 
+ * This file is part of minecraftd.
+
+ * minecraftd is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+
+ * minecraftd is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * You should have received a copy of the GNU General Public License
+ * along with minecraftd.  If not, see <http://www.gnu.org/licenses/>.
+ */
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/sysinfo.h>
@@ -244,7 +259,8 @@ int main(int argc, char** argv) {
         exit(EXIT_SUCCESS);
     }
     char* config_file_path = (char*) "/etc/minecraftd/config.txt";
-    while ((c = getopt(argc, argv, "dks:e:f:")) != -1) {
+    char* port_num = (char*) "25565";
+    while ((c = getopt(argc, argv, "dks:e:f:p:")) != -1) {
         switch (c) {
         case 'd':
             if (server_running == 0) {
@@ -301,6 +317,9 @@ int main(int argc, char** argv) {
         case 'f':
             config_file_path = optarg;
             break;
+        case 'p':
+            port_num = optarg;
+            break;
         case '?':
             if (optopt == 'e')
                 fprintf(stderr, "Option -%c requires an argument.\n", optopt);
@@ -323,8 +342,8 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     rewind(config);
-    char configs[8][257]; // java, minheap, maxheap, jarfile, restart_threshold, user, group, datadir
-    for (int i = 0; i < 8; ++i) {
+    char configs[9][257]; // java, minheap, maxheap, jarfile, restart_threshold, user, group, datadir, port
+    for (int i = 0; i < 9; ++i) {
         memset(configs[i], 0, 257);
     }
     if (config != NULL) {
@@ -390,6 +409,10 @@ int main(int argc, char** argv) {
                 memcpy(configs[7], real_val, status);
                 printf("Using server data from `%s'\n", real_val);
             }
+            if (strcmp("port", real_key) == 0) {
+                memcpy(configs[8], real_val, status);
+                printf("Using port %s\n", real_val);
+            }
         } while(status != -1);
         fclose(config);
     } else {
@@ -404,21 +427,20 @@ int main(int argc, char** argv) {
         printf("Non-option argument %s\n", argv[index]);
     // return 0;
     if (dflag) {
-        if (geteuid()) {
-            printf("Try `sudo");
-            for (int i = 0; i < argc; ++i) {
-                printf(" %s", argv[i]);
-            }
-            printf("'\n");
-            return EXIT_FAILURE;
-        } 
-        
         // drop priviledges
         if (configs[6][0] != 0) {
             errno = 0;
             struct group* grp = getgrnam(configs[6]);
             if (grp != NULL) {
-                setgid(grp->gr_gid);
+                if (setgid(grp->gr_gid) == -1) {
+                    printf("Try `sudo");
+                    for (int i = 0; i < argc; ++i) {
+                        printf(" %s", argv[i]);
+                    }
+                    printf("'\n");
+                    return EXIT_FAILURE;
+                } 
+                    
             } else {
                 printf("An error occured while mapping group\n");
                 exit(EXIT_FAILURE);
@@ -429,7 +451,14 @@ int main(int argc, char** argv) {
         if (configs[5][0] != 0) { 
             struct passwd* user = getpwnam(configs[5]);
             if (user != NULL) {
-                setuid(user->pw_uid);
+                if (setuid(user->pw_uid) == -1) {
+                    printf("Try `sudo");
+                    for (int i = 0; i < argc; ++i) {
+                        printf(" %s", argv[i]);
+                    }
+                    printf("'\n");
+                    return EXIT_FAILURE;
+                } 
             } else {
                 printf("An error occured while mapping user\n");
                 exit(EXIT_FAILURE);
@@ -586,10 +615,10 @@ int main(int argc, char** argv) {
                 dup2(slave_pty_fd, STDERR_FILENO); // stderr
                 close(master_pty_fd);
                 close(slave_pty_fd);
-                syslog(LOG_NOTICE, "child %d calling execl(), cmd %s %s %s -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalPacing %s -Duser.timezone=Asia/Hong_Kong -jar %s", getpid(), configs[0], args[0], args[1], args[2], configs[3]);
+            syslog(LOG_NOTICE, "child %d calling execl(), cmd %s %s %s -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalPacing %s -Duser.timezone=Asia/Hong_Kong -Djline.terminal=jline.UnsupportedTerminal -jar %s -p %s", getpid(), configs[0], args[0], args[1], args[2], configs[3], configs[8]);
                 // int _s=execl("/bin/cat", "cat", (char*) NULL);
                 // server_pid=getpid();
-                int _s = execl(configs[0], "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-Duser.timezone=Asia/Hong_Kong", "-jar", configs[3], (char*)NULL);
+                int _s = execl(configs[0], "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-Duser.timezone=Asia/Hong_Kong", "-Djline.terminal=jline.UnsupportedTerminal", "-jar", configs[3], "-p", configs[8], (char*) NULL);
                 syslog(LOG_ERR, "child %d back from execl(), status %d, errno %d", getpid(), _s, errno);
                 exit(1);
             } else {
