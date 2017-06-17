@@ -13,6 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with minecraftd.  If not, see <http://www.gnu.org/licenses/>.
  */
+
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/sysinfo.h>
@@ -34,11 +35,18 @@
 #include <sys/file.h>
 #include <pwd.h>
 #include <grp.h>
+#include <map>
+#include <string>
+
+// I suspect if this works.
+// minutes_wasted_here > 40 * 60 is definitely true
 
 #define WAIT_SEC 0
 #define WAIT_USEC 500000
 
 bool respawn = true;
+std::map<std::string, std::string> global_config;
+std::string socket_path;
 
 int set_nonblocking(int fd);
 size_t trim(char* out, size_t len, const char* str);
@@ -48,6 +56,9 @@ void reload(int sig);
 void term(int sig);
 void instructions(char** argv);
 void send_cmd(char* cmd);
+int _open(std::string path, int mode);
+int _open(std::string path, int mode, int perm);
+FILE* fopen(std::string path, char* mode);
 
 int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -97,7 +108,7 @@ int daemonize(char* name, char* path, char* outfile, char* errfile, char* infile
     if (!errfile) {
         errfile = (char*)"/dev/null";
     }
-    // printf("%s %s %s %s\n",name,path,outfile,infile);
+
     pid_t child;
     // fork, detach from process group leader
     if ((child = fork()) < 0) { // failed fork
@@ -161,7 +172,6 @@ void term(int sig) {
     // stop server
     respawn = false;
     syslog(LOG_NOTICE, "SIGTERM received, terminating");
-    // syslog(LOG_NOTICE, (string("echo ")+screen+" > test").c_str());
     send_cmd((char*)"stop");
     return;
 }
@@ -174,6 +184,7 @@ Usage: %s -d|-k|-s|-e [argument]\n\
         -s something: Say something as [Server]\n\
         -e command  : Execute command in the console\n\
         -f file     : Use this config file\n\
+        -p port     : Server port, overrides server.properties\n\
 Precedence of flags are same as above\n",
            argv[0]);
 }
@@ -188,9 +199,10 @@ void send_cmd(char* cmd) {
     }
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "\0minecraftdipc", sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path + 1, global_config["data_dir"].c_str(), sizeof(addr.sun_path) - 1);
+    printf("data_dir = %s\n", global_config["data_dir"].c_str());
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
-        perror("connect");
+        printf("connect \\0%s: %m", addr.sun_path + 1);
         exit(1);
     }
     // send
@@ -222,13 +234,92 @@ void send_cmd(char* cmd) {
     }
 }
 
+int _open(std::string path, int mode) {
+    return open(path.c_str(), mode);
+}
+
+int _open(std::string path, int mode, int perm) {
+    return open(path.c_str(), mode, perm);
+}
+
+FILE* fopen(std::string path, const char* mode) {
+    return fopen(path.c_str(), mode);
+}
+
 int main(int argc, char** argv) {
     char* cvalue = NULL;
     char c = 0;
     int pflag = 0, dflag = 0;
+    // before before start, parse config file
+    // look for a -f flag in options
+    char* config_file_path = (char*) "/etc/minecraftd/config.txt"; //default
+    for (int i = 1; i < argc - 1; ++i) {
+        if (strcmp(argv[i], "-f") == 0){
+            config_file_path = argv[1 + i];
+        }
+    }
+    FILE* config = fopen(config_file_path, "a+");
+    if (config == NULL) {
+        printf("Cannot open config file %s: %s\n", config_file_path, strerror(errno));
+        return EXIT_FAILURE;
+    }
+    rewind(config);
+    // some default global config
+    global_config["java"] = "/usr/bin/java";
+    global_config["minheap"] = "30";
+    global_config["maxheap"] = "70";
+    global_config["jarfile"] = "spigot-1.11.2.jar";
+    global_config["restart_threshold"] = "60";
+    global_config["user"] = "minecraft";
+    global_config["group"] = "minecraft";
+    global_config["data_dir"] = "/etc/minecraftd/data";
+    global_config["port"] = "25565";
+
+    // real parse code
+    if (config != NULL) {
+        // continue parse
+        char* key = NULL;
+        char* val = NULL;
+        char real_key[33];
+        char real_val[257];
+        int status = 0;
+        do {
+            // free
+            if (key != NULL) free(key);
+            if (val != NULL) free(val);
+            key = NULL;
+            val = NULL;
+            size_t s1 = 34, s2 = 258, s3 = 1025;
+            status = getdelim(&key, &s1, '=', config);
+            if (status > 33 || status < 0) {
+                if (status < 0) break; //end of config file
+                printf("Key %s is too long (%d, %d)\n", key, status, errno);
+                getdelim(&val, &s3, '\n', config); //consume the line
+                continue;
+            }
+            key[status - 1] = 0; //remove `='
+            status = getdelim(&val, &s2, '\n', config);
+            if (status > 257 || status < 0) {
+                if (status < 0) break;
+                printf("Value %s is too long\n", val);
+                continue;
+            }
+            val[status - 1] = 0; // remove newline
+            trim(real_val, 257, val);
+            trim(real_key, 33, key);
+            // define config items here
+            global_config[real_key] = real_val;
+        } while(status != -1);
+        fclose(config);
+    } else {
+        printf("Unable to open config file `%s': %m", config_file_path);
+        return EXIT_FAILURE;
+    }
+    socket_path = "\0";
+    socket_path += global_config["data_dir"];
 
     // before start, check process existed
-    int _pidfile = open("/etc/minecraftd/pidfile", O_RDONLY, 0644);
+    int _pidfile = _open(global_config["data_dir"] + "/pidfile", O_RDONLY, 0644);
     int server_running = 0; // 0: not runnng, 1: running, -ve: error
     int last_pid = 0;
     if (_pidfile == -1) {
@@ -237,8 +328,6 @@ int main(int argc, char** argv) {
         if (flock(_pidfile, LOCK_EX|LOCK_NB) == -1) {
             switch (errno) {
                 case EWOULDBLOCK:
-                    // printf("Server already running\n");
-                    // exit(EXIT_FAILURE);
                     server_running = 1;
                     char pid_str[6];
                     read(_pidfile, pid_str, 5);
@@ -246,7 +335,6 @@ int main(int argc, char** argv) {
                     break;
                 default:
                     server_running = -errno;
-                   //  exit(EXIT_FAILURE);
             }
         } else {
             // server not running
@@ -258,22 +346,20 @@ int main(int argc, char** argv) {
         instructions(argv);
         exit(EXIT_SUCCESS);
     }
-    char* config_file_path = (char*) "/etc/minecraftd/config.txt";
-    char* port_num = (char*) "25565";
     while ((c = getopt(argc, argv, "dks:e:f:p:")) != -1) {
         switch (c) {
         case 'd':
             if (server_running == 0) {
                 dflag = true;
             } else {
-		if (server_running == 1) {
-                    printf("Server already running\n");
-		} else {
-		    printf("Error: %s\n", strerror(-server_running));
-		}
-                exit(EXIT_FAILURE);
-            }
-            break;
+		    if (server_running == 1) {
+                printf("Server already running\n");
+		    } else {
+		        printf("Error: %s\n", strerror(-server_running));
+    		}
+            exit(EXIT_FAILURE);
+        }
+        break;
         case 'k':
             // kill server, send stop
             if (server_running == 0) {
@@ -315,10 +401,10 @@ int main(int argc, char** argv) {
             return 0;
             break;
         case 'f':
-            config_file_path = optarg;
+            // DO NOTHING
             break;
         case 'p':
-            port_num = optarg;
+            global_config["port"] = optarg;
             break;
         case '?':
             if (optopt == 'e')
@@ -328,109 +414,21 @@ int main(int argc, char** argv) {
             else
                 fprintf(stderr, "Unknown option character `\\x%x'.\n", optopt);
             instructions(argv);
-             return EXIT_FAILURE;
+            return EXIT_FAILURE;
         default:
             instructions(argv);
             return 0;
         }
     }
-    // printf ("pflag = %d, dflag = %d, evalue = %s\n", pflag, dflag, cvalue);
     // parse config file
-    FILE* config = fopen(config_file_path, "a+");
-    if (config == NULL) {
-        printf("Cannot open config file %s: %s\n", config_file_path, strerror(errno));
-        return EXIT_FAILURE;
-    }
-    rewind(config);
-    char configs[9][257]; // java, minheap, maxheap, jarfile, restart_threshold, user, group, datadir, port
-    for (int i = 0; i < 9; ++i) {
-        memset(configs[i], 0, 257);
-    }
-    if (config != NULL) {
-        // continue parse
-        char* key = NULL;
-        char* val = NULL;
-        char real_key[33];
-        char real_val[257];
-        int status = 0;
-        do {
-            // free
-            if (key != NULL) free(key);
-            if (val != NULL) free(val);
-            key = NULL;
-            val = NULL;
-            size_t s1 = 34, s2 = 258, s3 = 1025;
-            status = getdelim(&key, &s1, '=', config);
-            if (status > 33 || status < 0) {
-                if (status < 0) break; //end of config file
-                printf("Key %s is too long (%d, %d)\n", key, status, errno);
-                getdelim(&val, &s3, '\n', config); //consume the line
-                continue;
-            }
-            key[status - 1] = 0; //remove `='
-            status = getdelim(&val, &s2, '\n', config);
-            //val[status - 1] = 0;
-            if (status > 257 || status < 0) {
-                if (status < 0) break;
-                printf("Value %s is too long\n", val);
-                continue;
-            }
-            val[status - 1] = 0; // remove newline
-            trim(real_val, 257, val);
-            trim(real_key, 17, key);
-            // printf("Key '%s' has value '%s'\n", real_key, real_val);
-            // define config items here
-            if (strcmp("java", real_key) == 0) {
-                memcpy(configs[0], real_val, status);
-                printf("Using Java `%s'\n", real_val);
-            }
-            if (strcmp("minheap", real_key) == 0) {
-                memcpy(configs[1], real_val, status);
-                printf("Initial heap will be %s%% of system RAM\n", real_val);
-            }
-            if (strcmp("maxheap", real_key) == 0) {
-                memcpy(configs[2], real_val, status);
-                printf("Maximum heap will be %s%% of system RAM\n", real_val);
-            }
-            if (strcmp("jarfile", real_key) == 0) {
-                memcpy(configs[3], real_val, status);
-                printf("Using server jar file `%s' within data directory\n", real_val);
-            }
-            if (strcmp("restart_threshold", real_key) == 0) {
-                memcpy(configs[4], real_val, status);
-            }
-            if (strcmp("user", real_key) == 0) {
-                memcpy(configs[5], real_val, status);
-            }
-            if (strcmp("group", real_key) == 0) {
-                memcpy(configs[6], real_val, status);
-            }
-            if (strcmp("datadir", real_key) == 0) {
-                memcpy(configs[7], real_val, status);
-                printf("Using server data from `%s'\n", real_val);
-            }
-            if (strcmp("port", real_key) == 0) {
-                memcpy(configs[8], real_val, status);
-                printf("Using port %s\n", real_val);
-            }
-        } while(status != -1);
-        fclose(config);
-    } else {
-        perror("Unable to open config file");
-        return EXIT_FAILURE;
-    }
     // no longer able to setgid after setuid. minutes_wasted_here=90;
     // setgid(25565);
     // setuid(25565);
-
-    for (int index = optind; index < argc; index++)
-        printf("Non-option argument %s\n", argv[index]);
-    // return 0;
     if (dflag) {
-        // drop priviledges
-        if (configs[6][0] != 0) {
+        // drop privileges
+        if (global_config["group"][0] != 0) {
             errno = 0;
-            struct group* grp = getgrnam(configs[6]);
+            struct group* grp = getgrnam(global_config["group"].c_str());
             if (grp != NULL) {
                 if (setgid(grp->gr_gid) == -1) {
                     printf("Try `sudo");
@@ -442,14 +440,14 @@ int main(int argc, char** argv) {
                 } 
                     
             } else {
-                printf("An error occured while mapping group\n");
+                printf("An error occured while mapping group `%s'\n", global_config["group"].c_str());
                 exit(EXIT_FAILURE);
             }
         } else {
-            setgid(25565);
+            setgid(25565); //if failed to set then use original
         }
-        if (configs[5][0] != 0) { 
-            struct passwd* user = getpwnam(configs[5]);
+        if (global_config["user"][0] != 0) { 
+            struct passwd* user = getpwnam(global_config["user"].c_str());
             if (user != NULL) {
                 if (setuid(user->pw_uid) == -1) {
                     printf("Try `sudo");
@@ -460,14 +458,14 @@ int main(int argc, char** argv) {
                     return EXIT_FAILURE;
                 } 
             } else {
-                printf("An error occured while mapping user\n");
+                printf("An error occured while mapping user `%s'\n", global_config["user"].c_str());
                 exit(EXIT_FAILURE);
             }
         } else {
             setuid(25565);
         }
 
-        FILE* pidfile = fopen("/etc/minecraftd/pidfile", "w+");
+        FILE* pidfile = fopen(global_config["data_dir"] + "/pidfile", "w+");
         if (pidfile == NULL) {
             printf("Cannot open pidfile for writing, aborting (%m)\n");
             exit(1);
@@ -482,7 +480,7 @@ int main(int argc, char** argv) {
         umask(0002);
         pid_t daemon_id = getpid();
         // write pid
-        pidfile = fopen("/etc/minecraftd/pidfile", "w+");
+        pidfile = fopen(global_config["data_dir"] + "/pidfile", "w+");
         if (pidfile == NULL) {
             syslog(LOG_ERR, "Cannot open pidfile");
             exit(1);
@@ -494,9 +492,6 @@ int main(int argc, char** argv) {
         // signal handlers
         signal(SIGHUP, reload);
         signal(SIGTERM, term);
-        // no longer root
-        //setuid(25565);
-        //setgid(25565);
         // create a socket at home
         int ipc_fd = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
         if (ipc_fd < 0) {
@@ -506,15 +501,15 @@ int main(int argc, char** argv) {
         struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, "\0minecraftdipc", sizeof(addr.sun_path) - 1);
-        // unlink before binding
-        // unlink("/tmp/minecraftdipc");
+        strncpy(addr.sun_path + 1, global_config["data_dir"].c_str(), sizeof(addr.sun_path) - 2);
+
+        syslog(LOG_INFO, "binding to \\0%s", addr.sun_path + 1);
         if (-1 == bind(ipc_fd, (struct sockaddr*)&addr, sizeof(addr))) {
-            syslog(LOG_ERR, "bind errno=%d", errno);
+            syslog(LOG_ERR, "bind errno = %d", errno);
             exit(1);
         }
         if (-1 == listen(ipc_fd, 1)) { // what? you need more connections?
-            syslog(LOG_ERR, "listen errno=%d", errno);
+            syslog(LOG_ERR, "listen errno = %d", errno);
             exit(1);
         }
         // init fd_set
@@ -524,7 +519,7 @@ int main(int argc, char** argv) {
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(ipc_fd, &readfds);
-        int _pidfile = open("/etc/minecraftd/pidfile", O_RDWR|O_CLOEXEC);
+        int _pidfile = _open(global_config["data_dir"] + "/pidfile", O_RDWR|O_CLOEXEC);
         if (_pidfile == -1) {
             syslog(LOG_ERR, "Cannot open pidfile");
             exit(EXIT_FAILURE);
@@ -554,37 +549,16 @@ int main(int argc, char** argv) {
         int minheap_percent = 30;
         int maxheap_percent = 70;
         int restart_threshold = 60;
-        if (configs[0][0] == 0) { //not set
-           // configs[0] = "/usr/bin/java";
-            memcpy(configs[0], (char*) "/usr/bin/java", 14);
-        }
-        if (configs[1][0] != 0) {
-            sscanf(configs[1], "%d", &minheap_percent);
+            sscanf(global_config["minheap"].c_str(), "%d", &minheap_percent);
             minheap = minheap_percent * ram_mb / 100;
-        }
-        if (configs[2][0] != 0) {
-            sscanf(configs[2], "%d", &maxheap_percent);
+            sscanf(global_config["maxheap"].c_str(), "%d", &maxheap_percent);
             maxheap = maxheap_percent * ram_mb / 100;
-        }
-        if (configs[3][0] == 0) {
-            //configs[3] = "spigot-1.11.2.jar";
-            memcpy(configs[3], (char*) "spigot-1.11.2.jar", 18);
-        }
-        if (configs[4][0] != 0) {
-            sscanf(configs[4], "%d", &restart_threshold);
-        }
+            sscanf(global_config["restart_threshold"].c_str(), "%d", &restart_threshold);
         do {
             syslog(LOG_NOTICE, "Starting server %d...", restart_count);
             restarts[restart_count] = microtime();
             // cd to data dir
-            if (configs[7][0] != 0) {
-                chdir(configs[7]);
-            } else {
-                chdir("/etc/minecraftd/data/");
-            }
-            if (configs[8][0] == 0) {
-                memcpy(configs[8], (char*) "25565", 6);
-            }
+            chdir(global_config["data_dir"].c_str());
             // why dont just allocate a pty?
             int master_pty_fd = getpt();
             if (master_pty_fd < 0) {
@@ -607,8 +581,6 @@ int main(int argc, char** argv) {
             sprintf(args[2], "-XX:ParallelGCThreads=%d", num_thr);
             syslog(LOG_NOTICE, "arg0=%s, arg1=%s, arg2=%s", args[0], args[1], args[2]);
             // https://stackoverflow.com/a/12839498
-            // set_nonblocking(child_stdin[0]);
-            // set_nonblocking(child_stdin[1]);
             set_nonblocking(master_pty_fd);
             server_pid = fork();
             if (server_pid == 0) {
@@ -618,10 +590,9 @@ int main(int argc, char** argv) {
                 dup2(slave_pty_fd, STDERR_FILENO); // stderr
                 close(master_pty_fd);
                 close(slave_pty_fd);
-            syslog(LOG_NOTICE, "child %d calling execl(), cmd %s %s %s -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalPacing %s -Duser.timezone=Asia/Hong_Kong -Djline.terminal=jline.UnsupportedTerminal -jar %s -p %s", getpid(), configs[0], args[0], args[1], args[2], configs[3], configs[8]);
-                // int _s=execl("/bin/cat", "cat", (char*) NULL);
+            syslog(LOG_NOTICE, "child %d calling execl(), cmd %s %s %s -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalPacing %s -Duser.timezone=Asia/Hong_Kong -Djline.terminal=jline.UnsupportedTerminal -jar %s -p %s", getpid(), global_config["java"].c_str(), args[0], args[1], args[2], global_config["jarfile"].c_str(), global_config["port"].c_str());
                 // server_pid=getpid();
-                int _s = execl(configs[0], "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-Duser.timezone=Asia/Hong_Kong", "-Djline.terminal=jline.UnsupportedTerminal", "-jar", configs[3], "-p", configs[8], (char*) NULL);
+                int _s = execl(global_config["java"].c_str(), "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-Duser.timezone=Asia/Hong_Kong", "-Djline.terminal=jline.UnsupportedTerminal", "-jar", global_config["jarfile"].c_str(), "-p", global_config["port"].c_str(), (char*) NULL);
                 syslog(LOG_ERR, "child %d back from execl(), status %d, errno %d", getpid(), _s, errno);
                 exit(1);
             } else {
@@ -639,22 +610,17 @@ int main(int argc, char** argv) {
                     // and send command
                     int _k = kill(server_pid, 0);
                     server_status = errno;
-                    // syslog(LOG_NOTICE, "kill(%d, 0) = %d, errno = %d", server_pid,_k,
-                    // errno);
                     if (_k == -1 && server_status == ESRCH) { // who fucking cares about errno when kill() says 0?
                         // minutes_wasted_here=90;
-                        // sleep(10);
                         break;
                     }
                     tv.tv_sec = WAIT_SEC;
                     tv.tv_usec = WAIT_USEC;
-                    // int client=-1;
                     FD_ZERO(&readfds);
                     FD_SET(ipc_fd, &readfds);
                     if (client > 0)
                         FD_SET(client, &readfds);
                     int maxfd = ipc_fd > client ? ipc_fd : client;
-                    // bool more_stdout=false;
                     maxfd = maxfd > master_pty_fd ? maxfd : master_pty_fd;
                     FD_SET(master_pty_fd, &readfds);
                     if (select(maxfd + 1, &readfds, NULL, NULL, &tv) >
@@ -681,11 +647,9 @@ int main(int argc, char** argv) {
                                 if (client > 0)
                                     write(client, buf, strlen(buf));
                                 memset(buf, 0, 1025);
-                                // more_stdout=true;
                             }
                         }
                     } else {
-                        // more_stdout=false;
                         if (client > 0) {
                             close(client);
                             client = -1;
@@ -695,8 +659,6 @@ int main(int argc, char** argv) {
                 // waitpid(server_pid, NULL, 0);
                 syslog(LOG_NOTICE, "Server pid %d exited", server_pid);
             }
-            // close(child_stdin[1]);
-            // close(child_stdout[0]);
 
             restart_count %= 5;
             if (restarts[restart_count] - restarts[(restart_count + 1) % 5] < restart_threshold) {
