@@ -21,6 +21,7 @@
 #include <sys/un.h>
 #include <iostream>
 #include <cstdio>
+#include <algorithm>
 #include <unistd.h>
 #include <cstdlib>
 #include <csignal>
@@ -37,6 +38,8 @@
 #include <grp.h>
 #include <map>
 #include <string>
+#include <sgtty.h>
+#include <termios.h>
 
 // I suspect if this works.
 // minutes_wasted_here > 40 * 60 is definitely true
@@ -97,7 +100,7 @@ int daemonize(char* name, char* path, char* outfile, char* errfile, char* infile
         path = (char*)"/";
     }
     if (!name) {
-        name = (char*)"medaemon";
+        name = (char*)"mydaemon";
     }
     if (!infile) {
         infile = (char*)"/dev/null";
@@ -200,7 +203,6 @@ void send_cmd(char* cmd) {
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path + 1, global_config["data_dir"].c_str(), sizeof(addr.sun_path) - 1);
-    printf("data_dir = %s\n", global_config["data_dir"].c_str());
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         printf("connect \\0%s: %m", addr.sun_path + 1);
         exit(1);
@@ -329,8 +331,8 @@ int main(int argc, char** argv) {
             switch (errno) {
                 case EWOULDBLOCK:
                     server_running = 1;
-                    char pid_str[6];
-                    read(_pidfile, pid_str, 5);
+                    char pid_str[8];
+                    read(_pidfile, pid_str, 7);
                     sscanf(pid_str, "%d", &last_pid);
                     break;
                 default:
@@ -444,7 +446,7 @@ int main(int argc, char** argv) {
                 exit(EXIT_FAILURE);
             }
         } else {
-            setgid(25565); //if failed to set then use original
+            setgid(65534); //if failed to set then use original
         }
         if (global_config["user"][0] != 0) { 
             struct passwd* user = getpwnam(global_config["user"].c_str());
@@ -462,7 +464,7 @@ int main(int argc, char** argv) {
                 exit(EXIT_FAILURE);
             }
         } else {
-            setuid(25565);
+            setuid(65534);
         }
 
         FILE* pidfile = fopen(global_config["data_dir"] + "/pidfile", "w+");
@@ -579,20 +581,26 @@ int main(int argc, char** argv) {
             sprintf(args[0], "-Xmx%dM", maxheap);
             sprintf(args[1], "-Xms%dM", minheap);
             sprintf(args[2], "-XX:ParallelGCThreads=%d", num_thr);
-            syslog(LOG_NOTICE, "arg0=%s, arg1=%s, arg2=%s", args[0], args[1], args[2]);
             // https://stackoverflow.com/a/12839498
             set_nonblocking(master_pty_fd);
             server_pid = fork();
             if (server_pid == 0) {
                 // child
+                // echo off
+                struct termios o_term;
+                tcgetattr(slave_pty_fd, &o_term);
+                o_term.c_lflag &= ~(ECHO|ICANON);
+                o_term.c_cc[VMIN] = 1;
+                o_term.c_cc[VTIME] = 0;
+                tcsetattr(slave_pty_fd, TCSAFLUSH, &o_term);
                 dup2(slave_pty_fd, STDIN_FILENO);   // stdin
                 dup2(slave_pty_fd, STDOUT_FILENO); // stdout
                 dup2(slave_pty_fd, STDERR_FILENO); // stderr
                 close(master_pty_fd);
                 close(slave_pty_fd);
-            syslog(LOG_NOTICE, "child %d calling execl(), cmd %s %s %s -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalPacing %s -Duser.timezone=Asia/Hong_Kong -Djline.terminal=jline.UnsupportedTerminal -jar %s -p %s", getpid(), global_config["java"].c_str(), args[0], args[1], args[2], global_config["jarfile"].c_str(), global_config["port"].c_str());
-                // server_pid=getpid();
-                int _s = execl(global_config["java"].c_str(), "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-Duser.timezone=Asia/Hong_Kong", "-Djline.terminal=jline.UnsupportedTerminal", "-jar", global_config["jarfile"].c_str(), "-p", global_config["port"].c_str(), (char*) NULL);
+                syslog(LOG_NOTICE, "warning: stdin fd 0 is%s a tty", isatty(0) ? "" : " not");
+                syslog(LOG_NOTICE, "child %d calling execl(), cmd %s %s %s -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalPacing %s -Duser.timezone=Asia/Hong_Kong -Djline.terminal=jline.UnsupportedTerminal -jar %s -p %s", getpid(), global_config["java"].c_str(), args[0], args[1], args[2], global_config["jarfile"].c_str(), global_config["port"].c_str());
+                int _s = execl(global_config["java"].c_str(), "java", args[0], args[1], "-XX:+UseConcMarkSweepGC", "-XX:+CMSIncrementalPacing", args[2], "-Duser.timezone=Asia/Hong_Kong", /*"-Djline.terminal=jline.UnsupportedTerminal", */"-jar", global_config["jarfile"].c_str(), "-p", global_config["port"].c_str(), (char*) NULL);
                 syslog(LOG_ERR, "child %d back from execl(), status %d, errno %d", getpid(), _s, errno);
                 exit(1);
             } else {
@@ -623,8 +631,8 @@ int main(int argc, char** argv) {
                     int maxfd = ipc_fd > client ? ipc_fd : client;
                     maxfd = maxfd > master_pty_fd ? maxfd : master_pty_fd;
                     FD_SET(master_pty_fd, &readfds);
-                    if (select(maxfd + 1, &readfds, NULL, NULL, &tv) >
-                            0) { // maxfd+1. minutes_wasted_here=60;
+                    if (select(maxfd + 1, &readfds, NULL, NULL, &tv) > 0) { // maxfd+1. minutes_wasted_here=60;
+                        memset(buf, 0, 1025);
                         if (FD_ISSET(ipc_fd, &readfds)) { // info from server
                             struct sockaddr_in clientname;
                             int size = sizeof clientname;
@@ -632,7 +640,6 @@ int main(int argc, char** argv) {
                                             (socklen_t*)&size);
                         }
                         if (client > 0 && FD_ISSET(client, &readfds)) { // info from client
-                            memset(buf, 0, 1025);
                             if (read(client, buf, 1024)) { // not eof
                                 write(master_pty_fd, buf, strlen(buf));
                                 write(master_pty_fd, "\n", 1);
@@ -643,10 +650,42 @@ int main(int argc, char** argv) {
                         }
                         if (FD_ISSET(master_pty_fd, &readfds)) {
                             // send to client if exist
+                            const char* inval_seq = ">\x1b[2K\r";
+                            int num_seq = sizeof(inval_seq) / sizeof(char*);
+                            std::string server_input;
+                            int open_pos = -1;
+                            int close_pos = -1;
+                            bool more = false;
+
                             while (read(master_pty_fd, buf, 1024) > 0) {
-                                if (client > 0)
-                                    write(client, buf, strlen(buf));
+                                if (client > 0) {
+                                    // let me do some sstring processing!
+                                    // write(client, buf, strlen(buf));
+                                    server_input += buf;
+                                }
                                 memset(buf, 0, 1025);
+                            }
+                            // replace!
+                            // only write anything between '[' and '\n', inclusive
+                            // if a packet starts contains '[', then write anything encountered, before seeing a '\n'
+                            open_pos = server_input.find('[');
+                            // check if it follows a \x1b
+                            // if it is then next
+                            while (open_pos > 0 && server_input[open_pos - 1] == '\x1b') {
+                                open_pos = server_input.find('[', open_pos + 1);
+                            }
+                            close_pos = server_input.find('\n');
+                            // to send, or not to send, that is the question
+                            if (more && close_pos < 0) {
+                                write(client, server_input.c_str(), server_input.length());
+                            }
+                            if (open_pos >= 0) {
+                                write(client, &server_input[open_pos], close_pos > open_pos ? close_pos - open_pos + 1: server_input.length() - open_pos + 1);
+                                more = true;
+                            }
+                            if (close_pos > 0 && open_pos < 0) {
+                                write(client, server_input.c_str(), 1 + close_pos);
+                                more = false;
                             }
                         }
                     } else {
